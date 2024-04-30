@@ -5,34 +5,35 @@
 #include <ESP8266mDNS.h>
 #include <EEPROM.h>
 #include <uri/UriGlob.h>
+#include <ESP8266HTTPClient.h>
+#include <PubSubClient.h>
+#include <WebSocketsServer.h>
 
-/*
-   This example serves a "hello world" on a WLAN and a SoftAP at the same time.
-   The SoftAP allow you to configure WLAN parameters at run time. They are not setup in the sketch but saved on EEPROM.
-
-   Connect your computer or cell phone to wifi network ESP_ap with password 12345678. A popup may appear and it allow you to go to WLAN config. If it does not then navigate to http://192.168.4.1/wifi and config it there.
-   Then wait for the module to connect to your wifi and take note of the WLAN IP it got. Then you can disconnect from ESP_ap and return to your regular WLAN.
-
-   Now the ESP8266 is in your network. You can reach it through http://192.168.x.x/ (the IP you took note of) or maybe at http://esp8266.local too.
-
-   This is a captive portal because through the softAP it will redirect any http request to http://192.168.4.1/
-*/
-
-/* Set these to your desired softAP credentials. They are not configurable at runtime */
 #ifndef APSSID
-#define APSSID "ESP_ap"
-#define APPSK "12345678"
+#define APSSID "CardinalWaveAP"
+#define APPSK "password"
 #endif
 
 const char *softAP_ssid = APSSID;
 const char *softAP_password = APPSK;
 
-/* hostname for mDNS. Should work at least on windows. Try http://esp8266.local */
-const char *myHostname = "esp8266";
+const char *myHostname = "cardinalwave";
 
-/* Don't set this wifi credentials. They are configurated at runtime and stored on EEPROM */
-char ssid[33] = "";
-char password[65] = "";
+char ssid[33] = "CardinalWaveSV";
+char password[65] = "serverPassword";
+
+HTTPClient http;
+
+// MQTT
+const char *MQTT_HOST = "192.168.12.1";
+const int MQTT_PORT = 1883;
+const char *MQTT_CLIENT_ID = "ESP8266_001";
+const char *MQTT_USER = "ESP8266_01";
+const char *MQTT_PASSWORD = "";
+const char *TOPIC = "esp8266_01/logs";
+
+WiFiClient client;
+PubSubClient mqttClient(client);
 
 // DNS server
 const byte DNS_PORT = 53;
@@ -40,6 +41,9 @@ DNSServer dnsServer;
 
 // Web server
 ESP8266WebServer server(80);
+
+// WebSocket
+WebSocketsServer webSocket = WebSocketsServer(81);
 
 /* Soft AP network parameters */
 IPAddress apIP(172, 217, 28, 1);
@@ -55,32 +59,6 @@ unsigned long lastConnectTry = 0;
 /** Current WLAN status */
 unsigned int status = WL_IDLE_STATUS;
 
-void loadCredentials() {
-  EEPROM.begin(512);
-  EEPROM.get(0, ssid);
-  EEPROM.get(0 + sizeof(ssid), password);
-  char ok[2 + 1];
-  EEPROM.get(0 + sizeof(ssid) + sizeof(password), ok);
-  EEPROM.end();
-  if (String(ok) != String("OK")) {
-    ssid[0] = 0;
-    password[0] = 0;
-  }
-  Serial.println("Recovered credentials:");
-  Serial.println(ssid);
-  Serial.println(strlen(password) > 0 ? "********" : "<no password>");
-}
-
-/** Store WLAN credentials to EEPROM */
-void saveCredentials() {
-  EEPROM.begin(512);
-  EEPROM.put(0, ssid);
-  EEPROM.put(0 + sizeof(ssid), password);
-  char ok[2 + 1] = "OK";
-  EEPROM.put(0 + sizeof(ssid) + sizeof(password), ok);
-  EEPROM.commit();
-  EEPROM.end();
-}
 
 /** Is this an IP? */
 boolean isIp(String str) {
@@ -99,12 +77,43 @@ String toStringIp(IPAddress ip) {
   return res;
 }
 
+// MQTT
+void callback(char* topic, byte* payload, unsigned int length)
+{
+    payload[length] = '\0';
+    int value = String((char*) payload).toInt();
+
+    Serial.println(topic);
+    Serial.println(value);
+   
+}
+
+// WebSocket
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[%u] Disconnected!\n", num);
+      break;
+    case WStype_CONNECTED:
+      {
+        IPAddress ip = webSocket.remoteIP(num);
+        Serial.printf("[%u] Connected from %d.%d.%d.%d\n", num, ip[0], ip[1], ip[2], ip[3]);
+      }
+      break;
+    case WStype_TEXT:
+      Serial.printf("[%u] Received text: %s\n", num, payload);
+      // Send a response back to the client
+      String echoMessage = "Received:  " + String((char*)payload);
+      webSocket.sendTXT(num, echoMessage);
+      break;
+  }
+}
 
 /** Redirect to captive portal if we got a request for another domain. Return true in that case so the page handler do not try to handle the request again. */
 boolean captivePortal() {
-  if (!isIp(server.hostHeader()) && server.hostHeader() != (String(myHostname) + ".local")) {
+  if (!isIp(server.hostHeader()) && server.hostHeader() != (String(myHostname) + ".net")) {
     Serial.println("Request redirected to captive portal");
-    server.sendHeader("Location", String("http://") + toStringIp(server.client().localIP()), true);
+    server.sendHeader("Location", String("http://") + (String(myHostname) + ".net"), true);
     server.send(302, "text/plain", "");  // Empty content inhibits Content-length header so we have to close the socket ourselves.
     server.client().stop();              // Stop is needed because we sent no content length
     return true;
@@ -119,88 +128,19 @@ void handleRoot() {
   server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   server.sendHeader("Pragma", "no-cache");
   server.sendHeader("Expires", "-1");
-
-  String Page;
-  Page += F("<!DOCTYPE html><html lang='en'><head>"
-            "<meta name='viewport' content='width=device-width'>"
-            "<title>CaptivePortal</title></head><body>"
-            "<h1>HELLO WORLD!!</h1>");
-  if (server.client().localIP() == apIP) {
-    Page += String(F("<p>You are connected through the soft AP: ")) + softAP_ssid + F("</p>");
-  } else {
-    Page += String(F("<p>You are connected through the wifi network: ")) + ssid + F("</p>");
-  }
-  Page += F("<p>You may want to <a href='/wifi'>config the wifi connection</a>.</p>"
-            "</body></html>");
-
-  server.send(200, "text/html", Page);
-}
-
-
-/** Wifi config page handler */
-void handleWifi() {
-  server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-  server.sendHeader("Pragma", "no-cache");
-  server.sendHeader("Expires", "-1");
-
-  String Page;
-  Page += F("<!DOCTYPE html><html lang='en'><head>"
-            "<meta name='viewport' content='width=device-width'>"
-            "<title>CaptivePortal</title></head><body>"
-            "<h1>Wifi config</h1>");
-  if (server.client().localIP() == apIP) {
-    Page += String(F("<p>You are connected through the soft AP: ")) + softAP_ssid + F("</p>");
-  } else {
-    Page += String(F("<p>You are connected through the wifi network: ")) + ssid + F("</p>");
-  }
-  Page += String(F("\r\n<br />"
-                   "<table><tr><th align='left'>SoftAP config</th></tr>"
-                   "<tr><td>SSID "))
-          + String(softAP_ssid) + F("</td></tr>"
-                                    "<tr><td>IP ")
-          + toStringIp(WiFi.softAPIP()) + F("</td></tr>"
-                                            "</table>"
-                                            "\r\n<br />"
-                                            "<table><tr><th align='left'>WLAN config</th></tr>"
-                                            "<tr><td>SSID ")
-          + String(ssid) + F("</td></tr>"
-                             "<tr><td>IP ")
-          + toStringIp(WiFi.localIP()) + F("</td></tr>"
-                                           "</table>"
-                                           "\r\n<br />"
-                                           "<table><tr><th align='left'>WLAN list (refresh if any missing)</th></tr>");
-  Serial.println("scan start");
-  int n = WiFi.scanNetworks();
-  Serial.println("scan done");
-  if (n > 0) {
-    for (int i = 0; i < n; i++) { Page += String(F("\r\n<tr><td>SSID ")) + WiFi.SSID(i) + ((WiFi.encryptionType(i) == ENC_TYPE_NONE) ? F(" ") : F(" *")) + F(" (") + WiFi.RSSI(i) + F(")</td></tr>"); }
-  } else {
-    Page += F("<tr><td>No WLAN found</td></tr>");
-  }
-  Page += F("</table>"
-            "\r\n<br /><form method='POST' action='wifisave'><h4>Connect to network:</h4>"
-            "<input type='text' placeholder='network' name='n'/>"
-            "<br /><input type='password' placeholder='password' name='p'/>"
-            "<br /><input type='submit' value='Connect/Disconnect'/></form>"
-            "<p>You may want to <a href='/'>return to the home page</a>.</p>"
-            "</body></html>");
-  server.send(200, "text/html", Page);
-  server.client().stop();  // Stop is needed because we sent no content length
-}
-
-/** Handle the WLAN save form and redirect to WLAN config page again */
-void handleWifiSave() {
-  Serial.println("wifi save");
-  server.arg("n").toCharArray(ssid, sizeof(ssid) - 1);
-  server.arg("p").toCharArray(password, sizeof(password) - 1);
-  server.sendHeader("Location", "wifi", true);
-  server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-  server.sendHeader("Pragma", "no-cache");
-  server.sendHeader("Expires", "-1");
-  server.send(302, "text/plain", "");  // Empty content inhibits Content-length header so we have to close the socket ourselves.
-  server.client().stop();              // Stop is needed because we sent no content length
-  saveCredentials();
-  connect = strlen(ssid) > 0;  // Request WLAN connect with new credentials if there is a SSID
+  String payloadReturn;
+  http.begin(client, "http://cardinalwave.net");
+  int httpCode = http.GET();
+  Serial.print(httpCode);
+  if(httpCode > 0 || httpCode == -1) {
+    String payload = http.getString();
+    Serial.println(payload);
+    payloadReturn = payload;
+    server.send(200, "text/html", payloadReturn);
+  }  
+  http.end();
+  payloadReturn = "<h1>Not Found</h1>";
+  server.send(200, "text/html", payloadReturn);
 }
 
 void handleNotFound() {
@@ -239,22 +179,22 @@ void setup() {
   dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
   dnsServer.start(DNS_PORT, "*", apIP);
 
+  /* Setup WebSocket */
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent);
   /* Setup web pages: root, wifi config pages, SO captive portal detectors and not found. */
   server.on("/", handleRoot);
-  server.on("/wifi", handleWifi);
-  server.on("/wifisave", handleWifiSave);
-  server.on(UriGlob("/generate_204*"), handleRoot);  // Android captive portal. Handle "/generate_204_<uuid>"-like requests. Might be handled by notFound handler.
-  server.on("/fwlink", handleRoot);                  // Microsoft captive portal. Maybe not needed. Might be handled by notFound handler.
   server.onNotFound(handleNotFound); 
   server.begin();  // Web server start
+
   Serial.println("HTTP server started");
-  loadCredentials();           // Load WLAN credentials from network
+  // loadCredentials();           // Load WLAN credentials from network
   connect = strlen(ssid) > 0;  // Request WLAN connect if there is a SSID
 }
 
 void connectWifi() {
   Serial.println("Connecting as wifi client...");
-  WiFi.disconnect();
+  // WiFi.disconnect();
   WiFi.begin(ssid, password);
   int connRes = WiFi.waitForConnectResult();
   Serial.print("connRes: ");
@@ -286,7 +226,25 @@ void loop() {
         Serial.println(ssid);
         Serial.print("IP address: ");
         Serial.println(WiFi.localIP());
+    
+        while (WiFi.status() != WL_CONNECTED) {
+          delay(500);
+          Serial.print(".");
+        }
 
+        Serial.println("Connected to Wi-Fi");
+        mqttClient.setServer(MQTT_HOST, MQTT_PORT);
+
+        while (!client.connected()) {
+          if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD )) {
+              Serial.println("Connected to MQTT broker");
+          } else {
+              delay(500);
+              Serial.print(".");
+          }
+        }
+
+        mqttClient.subscribe(TOPIC);
         // Setup MDNS responder
         if (!MDNS.begin(myHostname)) {
           Serial.println("Error setting up MDNS responder!");
@@ -299,11 +257,14 @@ void loop() {
         WiFi.disconnect();
       }
     }
-    if (s == WL_CONNECTED) { MDNS.update(); }
+    if (s == WL_CONNECTED) { MDNS.update();  mqttClient.setCallback(callback);}
   }
-  // Do work:
   // DNS
   dnsServer.processNextRequest();
   // HTTP
   server.handleClient();
+
+  // WebSocket
+  webSocket.loop();
+  webSocket.broadcastTXT("{mensagem: teste}");
 }
