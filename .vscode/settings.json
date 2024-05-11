@@ -8,6 +8,14 @@
         "vector": "cpp",
         "string_view": "cpp",
         "random": "cpp",
-        "ranges": "cpp"
+        "ranges": "cpp",
+        "array": "cpp",
+        "bitset": "cpp",
+        "initializer_list": "cpp",
+        "regex": "cpp",
+        "utility": "cpp",
+        "istream": "cpp",
+        "sstream": "cpp",
+        "functional": "cpp"
     }
 }
