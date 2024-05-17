@@ -201,9 +201,6 @@ boolean captivePortal() {
 }
 /** Handle root or redirect to captive portal */
 void handleRoot() {
-  if (captivePortal()) {  // If caprive portal redirect instead of displaying the page.
-    return;
-  }
   server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   server.sendHeader("Pragma", "no-cache");
   server.sendHeader("Expires", "-1");
@@ -217,14 +214,17 @@ void handleRoot() {
   
   String payloadSave;
   Serial.print(httpCode);
-  if(httpCode > 0 || httpCode == -1) {
-    String payload = http.getString();
+  if(httpCode > 0 ) {
     Serial.println(payload);
     payloadReturn = payload;
-    String payloadSave = preferences.getString("payload", payloadReturn);
+    String payloadSave = preferences.getString("payload", http.getString());
     server.send(200, "text/html", payloadSave);
+  } 
+  if (httpCode >= 0) {
+    http.begin(client, "http://cardinalwave.net");
+    server.send(200, "text/html", preferences.getString("payload", http.getString()));
   }
-  server.send(200, "text/html", preferences.getString("payload", payloadReturn));
+
   // http.end();
   // payloadReturn = "<h1>Not Found</h1>";
   // server.send(200, "text/html", payloadReturn);
