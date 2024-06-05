@@ -14,7 +14,7 @@
 #include <ArduinoJson.h>
 
 #ifndef APSSID
-#define APSSID "CardinalWaveAP"
+#define APSSID "CardinalCloudAP"
 #define APPSK "password"
 #endif
 
@@ -23,7 +23,7 @@ const char *softAP_password = APPSK;
 
 const char *myHostname = "cardinalwave";
 
-char ssid[33] = "CardinalWaveSV";
+char ssid[33] = "CardinalCloud";
 char password[65] = "serverPassword";
 
 HTTPClient http;
@@ -215,7 +215,6 @@ void handleRoot() {
   String payloadSave;
   Serial.print(httpCode);
   if(httpCode > 0 ) {
-    Serial.println(payload);
     payloadReturn = payload;
     String payloadSave = preferences.getString("payload", http.getString());
     server.send(200, "text/html", payloadSave);
