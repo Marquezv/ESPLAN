@@ -51,7 +51,7 @@ DNSServer dnsServer;
 ESP8266WebServer server(80);
 
 // WebSocket
-WebSocketsServer webSocket = WebSocketsServer(81);
+WebSocketsServer webSocket = WebSocketsServer(5000);
 
 /* Soft AP network parameters */
 IPAddress apIP(172, 217, 28, 1);
@@ -82,27 +82,23 @@ char* formatTopic(const char* sessionId, const char* action, const char *device)
 
 // JSON
 const char **deserializationJson(const char* payload){
-  // Allocate JsonBuffer
   // Use arduinojson.org/assistant to compute the capacity.
   StaticJsonDocument<200> doc;
 
   // Deserialize o JSON
   DeserializationError error = deserializeJson(doc, payload);
-
-    // Verifica se houve erro no processo de deserialização
   if (error) {
       Serial.print("Falha ao deserializar JSON: ");
       Serial.println(error.c_str());
       return {};
   }
-  const char* sessionId = doc["session_Id"]; 
+  const char* sessionId = doc["session_id"]; 
   const char* action = doc["action"];
 
   char* send = formatTopic(sessionId, action, TOPIC);
   char* receive = formatTopic(sessionId, action, TOPIC_SERVER);
 
   static const char *topic[] = {send, receive}; 
-  
   return topic;
 }
 /** Is this an IP? */
@@ -152,10 +148,11 @@ void callback(char* topic, byte* payload, unsigned int length)
     webSocket.broadcastTXT(payload);
 }
 
-void messageOverMqtt(const char *topic, const char *payload) {
+void messageOverMqtt(const char **topics, const char *payload) {
     mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD );
-    mqttClient.publish(topic, payload);
-    Serial.printf("Send message on %s", topic);
+    mqttClient.subscribe(topics[1]);
+    mqttClient.publish(topics[0], payload);
+    Serial.printf("Send message on %s", topics[0]);
     Serial.println();
     // mqttClient.disconnect();
 }
@@ -178,11 +175,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
       // Send a response back to the client
       Serial.printf("[%u] Connected from %d.%d.%d.%d\n", num);
       String echoMessage = "Received:  " + String((char*)payload);
-      webSocket.sendTXT(num, echoMessage);
-      messageOverMqtt(topics[0], (char*)payload);
-      mqttClient.subscribe(topics[1]);
-      Serial.println(topics[0]);
-      Serial.println(topics[1]);
+      messageOverMqtt(topics, (char*)payload);            
       break;
   }
 }
@@ -204,29 +197,12 @@ void handleRoot() {
   server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   server.sendHeader("Pragma", "no-cache");
   server.sendHeader("Expires", "-1");
-  String payloadReturn;
   http.begin(client, "http://cardinalwave.net");
-  int httpCode = http.GET();
-
-  String payload = http.getString();
-  int resultat = (strlen(payload.c_str()));
-  Serial.println(resultat);  
-  
-  String payloadSave;
-  Serial.print(httpCode);
-  if(httpCode > 0 ) {
-    payloadReturn = payload;
-    String payloadSave = preferences.getString("payload", http.getString());
-    server.send(200, "text/html", payloadSave);
-  } 
-  if (httpCode >= 0) {
-    http.begin(client, "http://cardinalwave.net");
-    server.send(200, "text/html", preferences.getString("payload", http.getString()));
+  while (http.GET() <= 0) {
+    http.begin(client, "http://cardinalwave.net"); 
   }
-
-  // http.end();
-  // payloadReturn = "<h1>Not Found</h1>";
-  // server.send(200, "text/html", payloadReturn);
+  String payload = http.getString();
+  server.send(200, "text/html", payload);
 }
 
 void handleNotFound() {
@@ -325,11 +301,14 @@ void loop() {
 
         Serial.println("Connected to Wi-Fi");
         mqttClient.setServer(MQTT_HOST, MQTT_PORT);
-
+       
         while (!client.connected()) {
           if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD )) {
               Serial.println("Connected to MQTT broker");
               mqttClient.setCallback(callback);
+              mqttClient.publish("/esp8266/device/connect", "ping");
+              mqttClient.subscribe("/server/#");
+              mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD );
           } else {
               delay(500);
               Serial.print(".");
@@ -352,13 +331,12 @@ void loop() {
   }
   // DNS
   dnsServer.processNextRequest();
+  // MQTT
+  mqttClient.loop();
   // HTTP
   server.handleClient();
-
   // WebSocket
   webSocket.loop();
 
-  // MQTT
-  mqttClient.loop();
   
 }
