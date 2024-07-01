@@ -12,6 +12,8 @@
 #include <Preferences.h>
 
 #include <ArduinoJson.h>
+#include <map>
+#include <string>
 
 #ifndef APSSID
 #define APSSID "CardinalCloudAP"
@@ -70,14 +72,79 @@ unsigned int status = WL_IDLE_STATUS;
 // Preferences ( ESP - MemoryManagent)
 Preferences preferences;
 
+// Client WebSocket
+struct WebSocketMQTTSessao {
+  uint8_t webSocketClientID;
+  char mqttTopic[100];
+};
+
+// Topic Type
+enum TopicType {
+  FULL_TOPIC,
+  SESSION_TOPIC
+};
+
+WebSocketMQTTSessao sessions[10]; // Supondo um máximo de 10 sessões simultâneas ///////// FAZER O CW-BFF-SERVICE MANDAR A SESSAO E DISPOSITIVO QUANDO CONECTADO NO SOCKET
+int sessionCount = 0;
+
+void addSession(uint8_t webSocketClientID, const char* mqttTopic) {
+  if (sessionCount < 10) {
+    sessions[sessionCount].webSocketClientID = webSocketClientID;
+    strncpy(sessions[sessionCount].mqttTopic, mqttTopic, sizeof(sessions[sessionCount].mqttTopic));
+    sessionCount++;
+    Serial.printf("WebSocket Client ID: %u\n", webSocketClientID);
+    Serial.printf("MQTT Topic: %s\n", mqttTopic);
+  } else {
+    Serial.println("Número máximo de sessões alcançado");
+  }
+}
+
+void removeSession(uint8_t webSocketClientID) {
+  for (int i = 0; i < sessionCount; i++) {
+    if (sessions[i].webSocketClientID == webSocketClientID) {
+      for (int j = i; j < sessionCount - 1; j++) {
+        sessions[j] = sessions[j + 1];
+      }
+      sessionCount--;
+      break;
+    }
+  }
+}
+
+uint8_t getWebSocketId(const char* mqttTopic) {
+  for (int i = 0; i < sessionCount; i++) {
+    Serial.print(sessions[i].mqttTopic);
+    Serial.print(sessions[i].webSocketClientID);
+    Serial.println();
+    if (sessions[i].mqttTopic == mqttTopic) {
+      Serial.println(sessions[i].mqttTopic);
+      return sessions[i].webSocketClientID;
+      break;
+    }
+  }
+  return 0;
+}
 
 char* formatTopic(const char* sessionId, const char* action, const char *device){
-  // Tamanho total necessário para a string retornada
-  size_t totalLength = strlen(device) + strlen(sessionId) + strlen(action) + 5; // 2 para o caractere de separação e o caractere nulo
-  // Alocando memória para o array de caracteres e copiando os valores
+  size_t totalLength = strlen(device) + strlen(sessionId) + strlen(action) + 5;
   char* format = new char[totalLength];
   snprintf(format, totalLength, "/%s/%s/%s", device, sessionId, action);
   return format;
+}
+
+char* extractSessionTopic(const char* fullTopic) {
+  const char* thirdSlash = strchr(strchr(strchr(fullTopic, '/') + 1, '/') + 1, '/');
+  if (thirdSlash == nullptr) return nullptr;
+
+  if (thirdSlash != nullptr) {
+    size_t lenght = thirdSlash - fullTopic;
+    char* sessionTopic = new char[lenght + 1];
+    strncpy(sessionTopic, fullTopic, lenght);
+    sessionTopic[lenght] = '\0';
+    return sessionTopic;
+  } else {
+    return strdup(fullTopic);
+  }
 }
 
 // JSON
@@ -132,8 +199,17 @@ char* uint8_to_string(uint8_t valor_uint8) {
     return str;
 }
 
-// Save on EEMPROM
-
+void messageWebSocket(char* payload, char* topic) {
+  uint8_t webSocketId = getWebSocketId(topic);
+  Serial.print("Send to WebSocket [");
+  Serial.print(topic);
+  Serial.print("|");
+  Serial.print(webSocketId);
+  Serial.print("] ");
+  Serial.println();
+  Serial.println(payload);
+  webSocket.sendTXT(webSocketId, payload);
+}
 
 // MQTT
 void callback(char* topic, byte* payload, unsigned int length)
@@ -141,11 +217,14 @@ void callback(char* topic, byte* payload, unsigned int length)
     Serial.print("Message arrived [");
     Serial.print(topic);
     Serial.print("] ");
-    for (int i = 0; i < length; i++) {
-      Serial.print((char)payload[i]);
-    }
+
+    char* payloadStr = new char[length + 1];
+    memcpy(payloadStr, payload, length);
+    payloadStr[length] = '\0'; // Adiciona o terminador nulo
+
     Serial.println();
-    webSocket.broadcastTXT(payload);
+    Serial.println(payloadStr);
+    messageWebSocket(payloadStr, topic);
 }
 
 void messageOverMqtt(const char **topics, const char *payload) {
@@ -154,13 +233,13 @@ void messageOverMqtt(const char **topics, const char *payload) {
     mqttClient.publish(topics[0], payload);
     Serial.printf("Send message on %s", topics[0]);
     Serial.println();
-    // mqttClient.disconnect();
 }
 
 // WebSocket
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_DISCONNECTED:
+      removeSession(num);
       Serial.printf("[%u] Disconnected!\n", num);
       break;
     case WStype_CONNECTED:
@@ -170,12 +249,9 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
       }
       break;
     case WStype_TEXT:
-      Serial.printf("[%u] Received text: %s\n", num, payload);
       const char **topics = deserializationJson((char*)payload);
-      // Send a response back to the client
-      Serial.printf("[%u] Connected from %d.%d.%d.%d\n", num);
-      String echoMessage = "Received:  " + String((char*)payload);
-      messageOverMqtt(topics, (char*)payload);            
+      messageOverMqtt(topics, (char*)payload);
+      addSession(num, extractSessionTopic(topics[0]));
       break;
   }
 }
